@@ -1,0 +1,160 @@
+name: kubeSecureCheck-scan
+run-name: kubeSecureCheck-scan
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/kubeSecureCheck.yml'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  polaris-scan:
+    runs-on: comcast-ubuntu-latest
+    container:
+      image: docker.io/your-dockerhub-username/kubesecurecheck:kb
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+      - name: Run Polaris Audit and filter severity danger
+        run: |
+          polaris version
+          echo "Running Polaris audit..."
+          polaris audit --format yaml --only-show-failed-tests > polaris-results.yaml
+      - name: Extract Polaris Findings
+        run: |
+          python3 polaris-scan.py
+      - name: Upload Polaris Scan Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: polaris-results
+          path: |
+            polaris-results.yaml
+            polaris_findings.csv
+
+  kubeaudit-scan:
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/your-dockerhub-username/kubesecurecheck:kb
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+      - name: Run Kubeaudit Security Scan
+        run: |
+          kubeaudit version
+          echo "Running kubeaudit all..."
+          kubeaudit all --kubeconfig ~/.kube/config --format json --exitcode 0 > kubeaudit-results.json
+      - name: Extract Kubeaudit Findings
+        run: |
+          python3 kubeaudit.py
+      - name: Upload Kubeaudit Scan Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubeaudit-results
+          path: |
+            kubeaudit-results.json
+            kubeaudit_findings.csv
+
+  trivy-scan:
+    runs-on: comcast-ubuntu-latest
+    container:
+      image: hub.comcast.net/hip/kubesecurecheck:kb
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+      - name: Trivy Scan Specific Container Images
+        run: |
+          echo "Running Trivy scan on specific container images..."
+          kubectl get pods -A -o jsonpath='{..image}' | tr ' ' '\n' | sort -u > images.txt
+          cat images.txt
+          mapfile -t images < images.txt
+          echo "[" > trivy-image-scan.json
+          for image in "${images[@]}"; do
+            echo "Scanning $image..."
+            trivy image --scanners vuln --format json --light --severity HIGH,CRITICAL "$image" | jq '.Results' >> trivy-image-scan.json
+            echo "," >> trivy-image-scan.json
+          done
+          sed -i '$ s/,$//' trivy-image-scan.json
+          echo "]" >> trivy-image-scan.json
+          cat trivy-image-scan.json
+      - name: Extract Trivy Findings
+        run: |
+          python3 trivy.py
+      - name: Upload Trivy Scan Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: |
+            trivy-image-scan.json
+            trivy_findings.csv
+
+  kube-bench-scan:
+    runs-on: comcast-ubuntu-latest
+    container:
+      image: hub.comcast.net/hip/kubesecurecheck:kb
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+      - name: Run kube-bench Security scan
+        run: |
+          kube-bench --config-dir /etc/kube-bench/cfg --config /etc/kube-bench/cfg/config.yaml --benchmark cis-1.20 --json > kube-bench-results.json
+      - name: Extract kube-bench Important Findings
+        run: |
+          python3 kubebench.py
+      - name: Upload Kube-bench Scan Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: kube-bench-results
+          path: |
+            kube-bench-results.json
+            kube-bench-results.csv
+
+  combine-results:
+    runs-on: comcast-ubuntu-latest
+    needs: [polaris-scan, kubeaudit-scan, trivy-scan, kube-bench-scan]
+    steps:
+      - name: Download Polaris Scan Results
+        uses: actions/download-artifact@v4
+        with:
+          name: polaris-results
+          path: ./results
+      - name: Download Kubeaudit Scan Results
+        uses: actions/download-artifact@v4
+        with:
+          name: kubeaudit-results
+          path: ./results
+      - name: Download Trivy Scan Results
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-results
+          path: ./results
+      - name: Download Kube-bench Scan Results
+        uses: actions/download-artifact@v4
+        with:
+          name: kube-bench-results
+          path: ./results
+      - name: Upload Combined Scan Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: KubeSecureCheck-reports
+          path: ./results
