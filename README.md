@@ -1,1 +1,2 @@
 # kubeSecureCheck
+![Architecture](./Architecture.png)
